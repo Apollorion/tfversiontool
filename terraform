@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+
+# Colors
+RED='\033[0;31m'
+NC='\033[0m'
+
+TERRAFORM_API="https://terraform.apollorion.com/"
+TERRAFORM_VERSION_DIRECTORY="${HOME}/.tfversions/"
+
+if ! [ -x "$(command -v jq)" ]; then
+  echo -e "${RED}Error: jq is not installed. Please install then try again.${NC}" >&2
+  exit 1
+fi
+
+if [ ! -d "${TERRAFORM_VERSION_DIRECTORY}" ]; then
+  mkdir "$TERRAFORM_VERSION_DIRECTORY"
+fi
+
+getArch(){
+  arch=$(uname -i > /dev/null 2>&1)
+  if [[ $arch == x86_64* ]]; then
+    bit_type="_amd64"
+  elif [[ $arch == i*86 ]]; then
+    bit_type="_386"
+  elif  [[ $arch == arm* ]]; then
+    bit_type="_arm"
+  elif [[ "$OSTYPE" == "darwin"* ]]; then
+    # This is a bad assumption, mac does not support uname -i
+    bit_type="_amd64"
+  else
+    echo -e "${RED}Unsupported architecture: ${arch}${NC}"
+    exit 1
+  fi
+
+  if [[ "$OSTYPE" == "linux-gnu" ]]; then
+    full_arch="linux${bit_type}"
+  elif [[ "$OSTYPE" == "darwin"* ]]; then
+    full_arch="darwin${bit_type}"
+  elif [[ "$OSTYPE" == "freebsd"* ]]; then
+    full_arch="freebsd${bit_type}"
+  elif [[ "$OSTYPE" == "openbsd"* ]]; then
+    full_arch="openbsd${bit_type}"
+  else
+    echo -e "${RED}Unsupported OS: ${OSTYPE}${NC}"
+    exit 1
+  fi
+
+  echo $full_arch
+}
+
+changeVersion(){
+  version=$1
+  print_message=$2
+
+  if [ "$print_message" != "latest_message" ]; then
+    echo "Changing to terraform version: ${version}"
+  fi
+
+  # Check if the terraform version exists
+  status=$(curl -sS -I "${TERRAFORM_API}${version}" | grep "HTTP/2" | awk '{ print $2; }')
+  if [ "$status" == "404" ]; then
+    echo -e "${RED}version ${version} is not available.${NC}"
+    exit 1
+  else
+    version_dir="${TERRAFORM_VERSION_DIRECTORY}${version}"
+
+    # If the version has not been downloaded
+    if [ ! -d "${version_dir}" ]; then
+      version_json=$(curl -sS "${TERRAFORM_API}${version}")
+      arch=$(getArch)
+      version_url=$(echo $version_json | jq -r ".architectures.${arch}.url")
+      version_sum=$(echo $version_json | jq -r ".architectures.${arch}.checksum")
+
+      mkdir "${version_dir}"
+      curl -sS $version_url -o "${version_dir}/${version}.zip"
+
+      # check the downloaded checksum
+      if [ "$(echo "${version_sum}  ${version_dir}/${version}.zip" | shasum -c | awk '{ print $2; }')" == "OK" ]; then
+        unzip "${version_dir}/${version}.zip" -d "${version_dir}/."
+        rm "${version_dir}/${version}.zip"
+        chmod +x "${version_dir}/terraform"
+
+        echo "$version" > "${TERRAFORM_VERSION_DIRECTORY}current"
+      else
+        echo -e "${RED}CHECKSUM was incorrect for ${version_dir}/${version}.zip, safely exiting.${NC}"
+        exit 1
+      fi
+    else
+      # If terraform was unzipped successfully, mark it as the current version
+      # otherwise, let them know something happened.
+      if [ ! -d "${version_dir}/terraform" ]; then
+        if [ "$version" == "latest" ]; then
+          rm -rf "${version_dir}"
+          changeVersion "latest" "latest_message"
+        else
+          echo "$version" > "${TERRAFORM_VERSION_DIRECTORY}current"
+        fi
+      else
+        echo -e "${RED}Something went wrong while downloading version ${version}."
+        echo -e "try running: rm -rf ${version_dir}, then rerunning terraform.${NC}"
+        exit 1
+      fi
+    fi
+  fi
+
+}
+
+useVersion(){
+  current_file="${TERRAFORM_VERSION_DIRECTORY}current"
+  if [ ! -f "${current_file}" ]; then
+      echo -e "${RED}No terraform version to use."
+      echo -e "try running: terraform changeVersion {{version_number}}, then rerunning terraform.${NC}"
+      exit 1
+  else
+    current_version=$(cat "${TERRAFORM_VERSION_DIRECTORY}current")
+    bin="${TERRAFORM_VERSION_DIRECTORY}${current_version}/terraform"
+    eval "$bin" "${@}"
+  fi
+}
+
+if [ "$1" == "changeVersion" ]; then
+  if [ "$2" == "" ]; then
+    echo -e "${RED}changeVersion must be called with a version number."
+    echo -e "${RED}example: terraform changeVersion 0.12.5${NC}"
+    exit 1
+  else
+    changeVersion $2
+  fi
+else
+  useVersion "${@}"
+fi
